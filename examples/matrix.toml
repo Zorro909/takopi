@@ -1,0 +1,41 @@
+# Example Matrix configuration for takopi
+#
+# Copy this file to ~/.takopi/takopi.toml and update the values.
+# Or run `takopi --onboard` for interactive setup.
+
+# Use Matrix as the transport
+transport = "matrix"
+
+# Default AI engine (codex, claude, opencode, pi)
+default_engine = "claude"
+
+[transports.matrix]
+# Matrix homeserver URL (discovered from user_id domain if not set)
+homeserver = "https://matrix.example.org"
+
+# Your Matrix user ID
+user_id = "@bot:example.org"
+
+# Authentication: use either access_token OR password
+access_token = "syt_your_access_token_here"
+# password = "your_password"
+
+# Optional: device ID for this bot instance
+device_id = "TAKOPI"
+
+# Required: room IDs to monitor (must be ! format, not # aliases)
+room_ids = ["!abc123:example.org"]
+
+# Optional: users whose room invites to auto-accept
+# user_allowlist = ["@admin:example.org", "@dev:example.org"]
+
+# Voice transcription (requires OPENAI_API_KEY env var)
+voice_transcription = false
+
+# File download settings
+file_download = true
+file_download_max_mb = 50
+
+# E2EE settings (requires matrix-nio[e2e])
+# e2ee_enabled = true
+# crypto_store_path = "~/.takopi/matrix_crypto.db"

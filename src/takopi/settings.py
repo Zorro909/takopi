@@ -7,12 +7,15 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     ValidationError,
     StringConstraints,
+    field_serializer,
     field_validator,
+    field_serializer,
     model_validator,
 )
-from pydantic.types import StrictInt
+from pydantic.types import SecretStr, StrictInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import TomlConfigSettingsSource
 
@@ -106,8 +109,64 @@ class TelegramTransportSettings(BaseModel):
     files: TelegramFilesSettings = Field(default_factory=TelegramFilesSettings)
 
 
+class MatrixTransportSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    homeserver: str | None = None
+    user_id: str | None = None
+    access_token: SecretStr | None = None
+    password: SecretStr | None = None
+    device_id: str | None = None
+    room_ids: list[str] = Field(default_factory=list)
+    user_allowlist: list[str] | None = None
+    voice_transcription: bool = False
+    file_download: bool = True
+    file_download_max_mb: int = 50
+    e2ee_enabled: bool | None = None
+    crypto_store_path: str | None = None
+
+    @field_validator("homeserver", "user_id", "device_id", mode="before")
+    @classmethod
+    def _validate_strings(cls, value: Any, info) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError(f"{info.field_name} must be a string")
+        return value.strip() if value else None
+
+    @field_validator("access_token", "password", mode="before")
+    @classmethod
+    def _validate_secrets(cls, value: Any, info) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError(f"{info.field_name} must be a string")
+        return value
+
+    @field_validator("room_ids", mode="before")
+    @classmethod
+    def _validate_room_ids(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("room_ids must be a list")
+        for room_id in value:
+            if not isinstance(room_id, str):
+                raise ValueError("each room_id must be a string")
+            if not room_id.startswith("!"):
+                raise ValueError(f"invalid room_id format: {room_id}")
+        return value
+
+    @field_serializer("access_token", "password")
+    def _dump_secrets(self, value: SecretStr | None) -> str | None:
+        return value.get_secret_value() if value else None
+
+
 class TransportsSettings(BaseModel):
-    telegram: TelegramTransportSettings
+    telegram: TelegramTransportSettings = Field(
+        default_factory=TelegramTransportSettings
+    )
+    matrix: MatrixTransportSettings = Field(default_factory=MatrixTransportSettings)
 
     model_config = ConfigDict(extra="allow")
 
@@ -189,6 +248,8 @@ class TakopiSettings(BaseSettings):
     ) -> dict[str, Any]:
         if transport_id == "telegram":
             return self.transports.telegram.model_dump()
+        if transport_id == "matrix":
+            return self.transports.matrix.model_dump()
         extra = self.transports.model_extra or {}
         raw = extra.get(transport_id)
         if raw is None:
