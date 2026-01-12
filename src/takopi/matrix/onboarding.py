@@ -23,7 +23,7 @@ from rich.table import Table
 
 from ..backends import EngineBackend, SetupIssue
 from ..backends_helpers import install_issue
-from ..config import ConfigError, dump_toml, ensure_table, read_config, write_config
+from ..config import ConfigError, ensure_table, read_config, write_config
 from ..engines import list_backends
 from ..logging import suppress_logs
 from ..settings import HOME_CONFIG_PATH, load_settings
@@ -150,6 +150,8 @@ def _render_config(
     access_token: str,
     room_ids: list[str],
     default_engine: str | None,
+    *,
+    send_startup_message: bool = True,
 ) -> str:
     lines: list[str] = []
     if default_engine:
@@ -162,6 +164,8 @@ def _render_config(
     lines.append(f'user_id = "{_toml_escape(user_id)}"')
     lines.append(f'access_token = "{_toml_escape(access_token)}"')
     lines.append(f"room_ids = {room_ids!r}")
+    if not send_startup_message:
+        lines.append("send_startup_message = false")
     return "\n".join(lines) + "\n"
 
 
@@ -243,6 +247,78 @@ async def _test_token(
     try:
         response = await client.sync(timeout=5000)
         return isinstance(response, nio.SyncResponse)
+    except Exception:
+        return False
+    finally:
+        await client.close()
+
+
+@dataclass(frozen=True, slots=True)
+class RoomInvite:
+    room_id: str
+    inviter: str | None
+    room_name: str | None
+
+
+async def _fetch_room_invites(
+    homeserver: str,
+    user_id: str,
+    access_token: str,
+) -> list[RoomInvite]:
+    """Fetch pending room invites."""
+    try:
+        import nio
+    except ImportError:
+        return []
+
+    client = nio.AsyncClient(homeserver, user_id)
+    client.access_token = access_token
+    client.user_id = user_id
+
+    try:
+        response = await client.sync(timeout=5000)
+        if not isinstance(response, nio.SyncResponse):
+            return []
+
+        invites: list[RoomInvite] = []
+        for room_id, invite_info in response.rooms.invite.items():
+            inviter: str | None = None
+            room_name: str | None = None
+
+            for event in invite_info.invite_state:
+                if hasattr(event, "sender"):
+                    inviter = event.sender
+                if hasattr(event, "name"):
+                    room_name = event.name
+
+            invites.append(RoomInvite(room_id, inviter, room_name))
+
+        return invites
+    except Exception:
+        return []
+    finally:
+        await client.close()
+
+
+async def _accept_room_invite(
+    homeserver: str,
+    user_id: str,
+    access_token: str,
+    room_id: str,
+) -> bool:
+    """Accept a room invite."""
+    try:
+        import nio
+    except ImportError:
+        return False
+
+    client = nio.AsyncClient(homeserver, user_id)
+    client.access_token = access_token
+    client.user_id = user_id
+
+    try:
+        response = await client.join(room_id)
+        return isinstance(response, nio.JoinResponse)
     except Exception:
         return False
     finally:
@@ -544,40 +620,131 @@ def interactive_setup(*, force: bool) -> bool:
         user_id, access_token, device_id = creds
 
         console.print("\nstep 3: room selection\n")
-        console.print("  send a message in any room where the bot is a member")
-        console.print("  waiting...")
+        console.print("  invite your bot to a room, then accept the invite here")
 
-        try:
-            room_id = anyio.run(_wait_for_room, homeserver, user_id, access_token)
-        except KeyboardInterrupt:
-            console.print("  cancelled")
-            return False
+        room_ids: list[str] = []
 
-        if room_id is None:
-            console.print("  failed to detect room")
-            room_id = questionary.text(
-                "enter room ID manually (e.g., !abc123:matrix.org):"
+        while True:
+            console.print("  fetching room invites...")
+            invites = cast(
+                list[RoomInvite],
+                anyio.run(_fetch_room_invites, homeserver, user_id, access_token),
+            )
+
+            if not invites:
+                console.print("  no pending invites found")
+                action = questionary.select(
+                    "what would you like to do?",
+                    choices=[
+                        "refresh invites",
+                        "enter room ID manually",
+                        "done selecting rooms" if room_ids else "skip (no rooms)",
+                    ],
+                ).ask()
+
+                if action is None:
+                    return False
+
+                if action == "refresh invites":
+                    continue
+
+                if action == "enter room ID manually":
+                    room_id = questionary.text(
+                        "enter room ID (e.g., !abc123:matrix.org):"
+                    ).ask()
+                    if room_id and room_id.strip():
+                        room_ids.append(room_id.strip())
+                        console.print(f"  added: {room_id.strip()}")
+                    continue
+
+                # done or skip
+                break
+
+            # Build choices from invites
+            choices: list[str] = []
+            for invite in invites:
+                label = invite.room_id
+                if invite.room_name:
+                    label = f"{invite.room_name} ({invite.room_id})"
+                if invite.inviter:
+                    label += f" from {invite.inviter}"
+                choices.append(label)
+            choices.append("refresh invites")
+            choices.append("enter room ID manually")
+            if room_ids:
+                choices.append("done selecting rooms")
+
+            selected = questionary.select(
+                "select a room invite to accept:",
+                choices=choices,
             ).ask()
-            if room_id is None or not room_id.strip():
+
+            if selected is None:
                 return False
-            room_id = room_id.strip()
 
-        console.print(f"  got room_id: {room_id}")
-        room_ids = [room_id]
+            if selected == "refresh invites":
+                continue
 
-        add_more = _confirm("add more rooms?", default=False)
-        while add_more:
-            extra = questionary.text("enter room ID:").ask()
-            if extra and extra.strip():
-                room_ids.append(extra.strip())
-                console.print(f"  added: {extra.strip()}")
+            if selected == "enter room ID manually":
+                room_id = questionary.text(
+                    "enter room ID (e.g., !abc123:matrix.org):"
+                ).ask()
+                if room_id and room_id.strip():
+                    room_ids.append(room_id.strip())
+                    console.print(f"  added: {room_id.strip()}")
+                continue
+
+            if selected == "done selecting rooms":
+                break
+
+            # Find the selected invite
+            selected_invite: RoomInvite | None = None
+            for invite in invites:
+                label = invite.room_id
+                if invite.room_name:
+                    label = f"{invite.room_name} ({invite.room_id})"
+                if invite.inviter:
+                    label += f" from {invite.inviter}"
+                if label == selected:
+                    selected_invite = invite
+                    break
+
+            if selected_invite is None:
+                continue
+
+            console.print(f"  accepting invite to {selected_invite.room_id}...")
+            accepted = anyio.run(
+                _accept_room_invite,
+                homeserver,
+                user_id,
+                access_token,
+                selected_invite.room_id,
+            )
+
+            if accepted:
+                room_ids.append(selected_invite.room_id)
+                console.print(f"  [green]joined {selected_invite.room_id}[/]")
+            else:
+                console.print(f"  [red]failed to join {selected_invite.room_id}[/]")
+
             add_more = _confirm("add more rooms?", default=False)
+            if not add_more:
+                break
 
-        sent = anyio.run(_send_confirmation, homeserver, user_id, access_token, room_id)
-        if sent:
-            console.print("  sent confirmation message")
-        else:
-            console.print("  could not send confirmation message")
+        if not room_ids:
+            console.print("  [yellow]warning: no rooms selected[/]")
+            proceed = _confirm("continue without rooms?", default=False)
+            if not proceed:
+                return False
+
+        if room_ids:
+            sent = anyio.run(
+                _send_confirmation, homeserver, user_id, access_token, room_ids[0]
+            )
+            if sent:
+                console.print("  sent confirmation message")
+            else:
+                console.print("  could not send confirmation message")
 
         console.print("\nstep 4: agent cli tools")
         rows = _render_engine_table(console)
@@ -622,12 +789,22 @@ def interactive_setup(*, force: bool) -> bool:
         else:
             console.print("  [green]E2EE support detected[/] ✓")
 
+        console.print("\nstep 4.6: startup message")
+        console.print("  takopi can send a status message when it starts")
+        send_startup_message = _confirm(
+            "send startup message when bot starts?",
+            default=True,
+        )
+        if send_startup_message is None:
+            return False
+
         config_preview = _render_config(
             homeserver,
             user_id,
             _mask_token(access_token),
             room_ids,
             default_engine,
+            send_startup_message=send_startup_message,
         ).rstrip()
         console.print("\nstep 5: save configuration\n")
         console.print(f"  {_display_path(config_path)}\n")
@@ -675,6 +852,7 @@ def interactive_setup(*, force: bool) -> bool:
         matrix["user_id"] = user_id
         matrix["access_token"] = access_token
         matrix["room_ids"] = room_ids
+        matrix["send_startup_message"] = send_startup_message
         if device_id:
             matrix["device_id"] = device_id
 

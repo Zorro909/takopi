@@ -238,6 +238,7 @@ class MatrixBridgeConfig:
     exec_cfg: ExecBridgeConfig
     voice_transcription: MatrixVoiceTranscriptionConfig | None = None
     file_download: MatrixFileDownloadConfig | None = None
+    send_startup_message: bool = True
 
 
 async def _send_plain(
@@ -257,6 +258,10 @@ async def _send_plain(
 
 
 async def _send_startup(cfg: MatrixBridgeConfig) -> None:
+    if not cfg.send_startup_message:
+        logger.debug("startup.message.disabled")
+        return
+
     logger.debug("startup.message", text=cfg.startup_msg)
     parts = MarkdownParts(header=cfg.startup_msg)
     text, formatted_body = prepare_matrix(parts)

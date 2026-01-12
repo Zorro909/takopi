@@ -124,6 +124,7 @@ class MatrixTransportSettings(BaseModel):
     file_download_max_mb: int = 50
     e2ee_enabled: bool | None = None
     crypto_store_path: str | None = None
+    send_startup_message: bool = True
 
     @field_validator("homeserver", "user_id", "device_id", mode="before")
     @classmethod

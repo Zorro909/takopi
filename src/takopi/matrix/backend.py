@@ -222,6 +222,9 @@ class MatrixBackend(TransportBackend):
 
         voice_transcription = _build_voice_transcription_config(transport_config)
         file_download = _build_file_download_config(transport_config)
+        send_startup_message = bool(
+            transport_config.get("send_startup_message", True)
+        )
 
         cfg = MatrixBridgeConfig(
             client=client,
@@ -232,6 +235,7 @@ class MatrixBackend(TransportBackend):
             exec_cfg=exec_cfg,
             voice_transcription=voice_transcription,
             file_download=file_download,
+            send_startup_message=send_startup_message,
         )
 
         # anyio.run only accepts positional args, so pass as a lambda
